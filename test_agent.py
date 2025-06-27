@@ -52,7 +52,7 @@ def evaluate(topk_matches, test_user_products):
     print(f"NDCG={avg_ndcg:.3f} | Recall={avg_recall:.3f} | HR={avg_hit:.3f} | Precision={avg_precision:.3f} | Invalid users={len(invalid_users)}")
 
 
-def batch_beam_search(env, model, user_ids, device, dataset, topk=[25, 5, 1]):
+def batch_beam_search(env, model, user_ids, device, dataset, max_hop, topk=[25, 5, 1]):
     def _batch_acts_to_masks(batch_acts):
         return np.vstack([np.pad(np.ones(len(acts)), (0, model.act_dim - len(acts)), 'constant') for acts in batch_acts])
 
@@ -61,7 +61,7 @@ def batch_beam_search(env, model, user_ids, device, dataset, topk=[25, 5, 1]):
     probs_pool = [[] for _ in user_ids]
     model.eval()
     
-    for hop in range(3):
+    for hop in range(max_hop):
         state_tensor = torch.FloatTensor(state_pool).to(device)
         acts_pool = env._batch_get_actions(path_pool, False)
         actmask_pool = _batch_acts_to_masks(acts_pool)
@@ -83,7 +83,7 @@ def batch_beam_search(env, model, user_ids, device, dataset, topk=[25, 5, 1]):
                 new_probs_pool.append(probs + [p])
         
         path_pool, probs_pool = new_path_pool, new_probs_pool
-        if hop < 2:
+        if hop < max_hop - 1:
             state_pool = env._batch_get_state(path_pool)
 
     return path_pool, probs_pool
@@ -102,12 +102,12 @@ def _predict_paths_worker(args_bundle):
     model.load_state_dict({**model.state_dict(), **pretrain_sd})
     model.eval()
 
-    batch_size = 16
+    batch_size = args.batch_size
     paths_chunk, probs_chunk = [], []
     for i in range(0, len(user_ids_chunk), batch_size):
         batch_user_ids = user_ids_chunk[i:i + batch_size]
         paths, probs = batch_beam_search(
-            env, model, batch_user_ids, device, dataset=args.dataset, topk=args.topk)
+            env, model, batch_user_ids, device, dataset=args.dataset, max_hop=args.max_path_len, topk=args.topk)
         paths_chunk.extend(paths)
         probs_chunk.extend(probs)
     return paths_chunk, probs_chunk
@@ -128,7 +128,7 @@ def predict_paths(policy_file, args, path_file):
     with ctx.Pool(processes=num_workers) as pool:
         results = list(tqdm(pool.imap_unordered(_predict_paths_worker, args_bundles), total=len(args_bundles), desc="Predicting Paths"))
 
-    for paths_chunk, probs_chunk in results:
+    for paths_chunk, probs_chunk in tqdm(results):
         all_paths.extend(paths_chunk)
         all_probs.extend(probs_chunk)
         
@@ -251,6 +251,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=123, help="random seed.")
     parser.add_argument("--gpu", type=str, default="0", help="gpu device.")
     parser.add_argument("--epochs", type=int, default=50, help="num of epochs.")
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size.')
     parser.add_argument("--max_acts", type=int, default=100, help="Max number of actions.")
     parser.add_argument("--max_path_len", type=int, default=3, help="Max path length.")
     parser.add_argument("--gamma", type=float, default=0.99, help="reward discount factor.")
