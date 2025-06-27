@@ -52,7 +52,7 @@ def evaluate(topk_matches, test_user_products):
     print(f"NDCG={avg_ndcg:.3f} | Recall={avg_recall:.3f} | HR={avg_hit:.3f} | Precision={avg_precision:.3f} | Invalid users={len(invalid_users)}")
 
 
-def batch_beam_search(env, model, user_ids, device, topk=[25, 5, 1]):
+def batch_beam_search(env, model, user_ids, device, dataset, topk=[25, 5, 1]):
     def _batch_acts_to_masks(batch_acts):
         return np.vstack([np.pad(np.ones(len(acts)), (0, model.act_dim - len(acts)), 'constant') for acts in batch_acts])
 
@@ -78,7 +78,7 @@ def batch_beam_search(env, model, user_ids, device, topk=[25, 5, 1]):
                 if idx >= len(acts_pool[row]):
                     continue
                 relation, next_node_id = acts_pool[row][idx]
-                next_node_type = path[-1][1] if relation == SELF_LOOP else (FOOD_KG_RELATION if args.dataset == FOOD else KG_RELATION)[path[-1][1]][relation]
+                next_node_type = path[-1][1] if relation == SELF_LOOP else (FOOD_KG_RELATION if dataset == FOOD else KG_RELATION)[path[-1][1]][relation]
                 new_path_pool.append(path + [(relation, next_node_type, next_node_id)])
                 new_probs_pool.append(probs + [p])
         
@@ -93,10 +93,8 @@ def _predict_paths_worker(args_bundle):
     """Worker function for predict_paths."""
     worker_id, user_ids_chunk, policy_file, args = args_bundle
     
-    # Set device for this worker process
-    gpus = args.gpu.split(',')
-    gpu_id = gpus[worker_id % len(gpus)]
-    device = torch.device(f"cuda:{gpu_id}") if torch.cuda.is_available() else "cpu"
+    # Always use device 0 for all workers
+    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
 
     env = BatchKGEnvironment(args.dataset, args.max_acts, max_path_len=args.max_path_len, state_history=args.state_history)
     pretrain_sd = torch.load(policy_file, map_location=device)
@@ -108,7 +106,8 @@ def _predict_paths_worker(args_bundle):
     paths_chunk, probs_chunk = [], []
     for i in range(0, len(user_ids_chunk), batch_size):
         batch_user_ids = user_ids_chunk[i:i + batch_size]
-        paths, probs = batch_beam_search(env, model, batch_user_ids, device, topk=args.topk)
+        paths, probs = batch_beam_search(
+            env, model, batch_user_ids, device, dataset=args.dataset, topk=args.topk)
         paths_chunk.extend(paths)
         probs_chunk.extend(probs)
     return paths_chunk, probs_chunk
