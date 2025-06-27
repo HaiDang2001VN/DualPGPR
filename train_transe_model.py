@@ -52,6 +52,7 @@ def extract_embeddings(args):
     model_file = f'{args.log_dir}/transe_model_sd_epoch_{args.epochs}.ckpt'
     print(f'Load embeddings {model_file}')
     state_dict = torch.load(model_file, map_location=lambda storage, loc: storage)
+    print(f"keys: {list(state_dict.keys())}")
     
     if args.dataset == FOOD:
         embeds = {
@@ -88,6 +89,8 @@ def extract_embeddings(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default=BEAUTY, help='One of {beauty, cd, cell, clothing}.')
+    # Add boolean argument to load existing checkpoints, if --load is passed (no value) then not train
+    parser.add_argument('--load', action='store_true', help='Load existing model checkpoints and extract embeddings.')
     parser.add_argument('--name', type=str, default='train_transe_model', help='model name.')
     parser.add_argument('--seed', type=int, default=123, help='random seed.')
     parser.add_argument('--gpu', type=str, default='0', help='gpu device.')
@@ -113,7 +116,11 @@ def main():
     logger.info(args)
 
     set_random_seed(args.seed)
-    train(args)
+    if not args.load:
+        logger.info('Start training...')
+        train(args)
+        logger.info('Training finished.')
+        
     extract_embeddings(args)
 
 if __name__ == '__main__':
