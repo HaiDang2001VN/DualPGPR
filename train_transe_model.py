@@ -77,7 +77,7 @@ def extract_embeddings(args):
             RPRODUCT: state_dict['related_product.weight'].cpu().data.numpy()[:-1],
             PURCHASE: (state_dict['purchase'].cpu().data.numpy()[0], state_dict['purchase_bias.weight'].cpu().data.numpy()),
             MENTION: (state_dict['mentions'].cpu().data.numpy()[0], state_dict['mentions_bias.weight'].cpu().data.numpy()),
-            DESCRIBED_AS: (state_dict['described_as'].cpu().data.numpy()[0], state_dict['described_as_bias.weight'].cpu().data.numpy()),
+            DESCRIBED_AS: (state_dict['describe_as'].cpu().data.numpy()[0], state_dict['describe_as_bias.weight'].cpu().data.numpy()),
             PRODUCED_BY: (state_dict['produced_by'].cpu().data.numpy()[0], state_dict['produced_by_bias.weight'].cpu().data.numpy()),
             BELONG_TO: (state_dict['belongs_to'].cpu().data.numpy()[0], state_dict['belongs_to_bias.weight'].cpu().data.numpy()),
             ALSO_BOUGHT: (state_dict['also_bought'].cpu().data.numpy()[0], state_dict['also_bought_bias.weight'].cpu().data.numpy()),
