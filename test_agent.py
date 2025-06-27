@@ -212,7 +212,7 @@ def evaluate_paths(path_file, train_labels, test_labels, args):
     best_pred_paths = {}
     with ctx.Pool(processes=num_workers) as pool:
         results_1 = list(tqdm(pool.imap_unordered(_evaluate_best_paths_worker, args_bundles_1), total=len(args_bundles_1), desc="Finding best paths"))
-    for chunk_result in results_1:
+    for chunk_result in tqdm(results_1, desc="Merging results"):
         best_pred_paths.update(chunk_result)
 
     # Parallelize generating final labels
@@ -224,7 +224,7 @@ def evaluate_paths(path_file, train_labels, test_labels, args):
     pred_labels = {}
     with ctx.Pool(processes=num_workers) as pool:
         results_2 = list(tqdm(pool.imap_unordered(_evaluate_labels_worker, args_bundles_2), total=len(args_bundles_2), desc="Generating labels"))
-    for chunk_result in results_2:
+    for chunk_result in tqdm(results_2, desc="Merging results"):
         pred_labels.update(chunk_result)
 
     evaluate(pred_labels, test_labels)
