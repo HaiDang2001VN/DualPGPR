@@ -244,13 +244,13 @@ def main():
     parser.add_argument('--epochs', type=int, default=100, help='Max number of epochs.')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size.')
     parser.add_argument('--lr', type=float, default=1e-4, help='learning rate.')
-    parser.add_argument('--max_acts', type=int, default=250, help='Max number of actions.')
+    parser.add_argument('--max_acts', type=int, default=100, help='Max number of actions.')
     parser.add_argument('--max_path_len', type=int, default=3, help='Max path length.')
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor.')
     parser.add_argument('--ent_weight', type=float, default=1e-3, help='weight factor for entropy loss')
     parser.add_argument('--act_dropout', type=float, default=0.5, help='action dropout rate.')
     parser.add_argument('--state_history', type=int, default=1, help='state history length')
-    parser.add_argument('--hidden', type=int, nargs='*', default=[512, 256], help='number of samples')
+    parser.add_argument('--hidden', type=int, nargs='*', default=[512, 256], help='hidden layer sizes.')
     
     args = parser.parse_args()
     args.device = torch.device('cuda') if torch.cuda.is_available() else 'cpu'
