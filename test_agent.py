@@ -3,6 +3,7 @@ import argparse
 from math import log
 from tqdm import tqdm
 import torch
+import multiprocessing as mp
 from functools import reduce
 from kg_env import BatchKGEnvironment, BatchCFKGEnvironment
 from train_agent import ActorCritic
@@ -88,33 +89,98 @@ def batch_beam_search(env, model, user_ids, device, topk=[25, 5, 1]):
     return path_pool, probs_pool
 
 
+def _predict_paths_worker(args_bundle):
+    """Worker function for predict_paths."""
+    worker_id, user_ids_chunk, policy_file, args = args_bundle
+    
+    # Set device for this worker process
+    gpus = args.gpu.split(',')
+    gpu_id = gpus[worker_id % len(gpus)]
+    device = torch.device(f"cuda:{gpu_id}") if torch.cuda.is_available() else "cpu"
+
+    env = BatchKGEnvironment(args.dataset, args.max_acts, max_path_len=args.max_path_len, state_history=args.state_history)
+    pretrain_sd = torch.load(policy_file, map_location=device)
+    model = ActorCritic(env.state_dim, env.act_dim, gamma=args.gamma, hidden_sizes=args.hidden).to(device)
+    model.load_state_dict({**model.state_dict(), **pretrain_sd})
+    model.eval()
+
+    batch_size = 16
+    paths_chunk, probs_chunk = [], []
+    for i in range(0, len(user_ids_chunk), batch_size):
+        batch_user_ids = user_ids_chunk[i:i + batch_size]
+        paths, probs = batch_beam_search(env, model, batch_user_ids, device, topk=args.topk)
+        paths_chunk.extend(paths)
+        probs_chunk.extend(probs)
+    return paths_chunk, probs_chunk
+
+
 def predict_paths(policy_file, args, path_file):
     print("Predicting paths...")
-    env = BatchKGEnvironment(args.dataset, args.max_acts, max_path_len=args.max_path_len, state_history=args.state_history)
-    
-    pretrain_sd = torch.load(policy_file, map_location=torch.device(args.device))
-    model = ActorCritic(env.state_dim, env.act_dim, gamma=args.gamma, hidden_sizes=args.hidden).to(args.device)
-    model.load_state_dict({**model.state_dict(), **pretrain_sd})
-
     test_labels = load_labels(args.dataset, "test")
     test_user_ids = list(test_labels.keys())
 
-    batch_size = 16
+    num_workers = max(1, min(args.num_workers, mp.cpu_count()))
+    chunk_size = (len(test_user_ids) + num_workers - 1) // num_workers
+    user_id_chunks = [test_user_ids[i:i + chunk_size] for i in range(0, len(test_user_ids), chunk_size)]
+    args_bundles = [(i, chunk, policy_file, args) for i, chunk in enumerate(user_id_chunks)]
+
     all_paths, all_probs = [], []
-    pbar = tqdm(total=len(test_user_ids))
-    
-    for start_idx in range(0, len(test_user_ids), batch_size):
-        end_idx = min(start_idx + batch_size, len(test_user_ids))
-        batch_user_ids = test_user_ids[start_idx:end_idx]
-        paths, probs = batch_beam_search(env, model, batch_user_ids, args.device, topk=args.topk)
-        all_paths.extend(paths)
-        all_probs.extend(probs)
-        pbar.update(batch_size)
+    ctx = mp.get_context('spawn')
+    with ctx.Pool(processes=num_workers) as pool:
+        results = list(tqdm(pool.imap_unordered(_predict_paths_worker, args_bundles), total=len(args_bundles), desc="Predicting Paths"))
+
+    for paths_chunk, probs_chunk in results:
+        all_paths.extend(paths_chunk)
+        all_probs.extend(probs_chunk)
         
     pickle.dump({"paths": all_paths, "probs": all_probs}, open(path_file, "wb"))
 
 
-def evaluate_paths(path_file, train_labels, test_labels):
+def _evaluate_best_paths_worker(args_bundle):
+    """Worker function to find the best path for each user-product pair."""
+    user_id_chunk, pred_paths, train_labels = args_bundle
+    best_pred_paths_chunk = {}
+    for user_id in user_id_chunk:
+        if user_id not in pred_paths:
+            continue
+        best_pred_paths_chunk[user_id] = []
+        train_product_ids = set(train_labels.get(user_id, []))
+        for product_id in pred_paths[user_id]:
+            if product_id in train_product_ids:
+                continue
+            sorted_paths = sorted(pred_paths[user_id][product_id], key=lambda x: x[1], reverse=True)
+            if sorted_paths:
+                best_pred_paths_chunk[user_id].append(sorted_paths[0])
+    return best_pred_paths_chunk
+
+
+def _evaluate_labels_worker(args_bundle):
+    """Worker function to generate final sorted recommendation lists."""
+    user_id_chunk, best_pred_paths, scores, train_labels, args = args_bundle
+    pred_labels_chunk = {}
+    for user_id in user_id_chunk:
+        if user_id not in best_pred_paths or not best_pred_paths[user_id]:
+            pred_labels_chunk[user_id] = []
+            continue
+        
+        sorted_paths = sorted(best_pred_paths[user_id], key=lambda x: (x[0], x[1]), reverse=True)
+        top10_product_ids = [p[-1][2] for _, _, p in sorted_paths[:10]]
+        
+        if args.add_products and len(top10_product_ids) < 10:
+            train_product_ids = set(train_labels.get(user_id, []))
+            candidate_product_ids = np.argsort(scores[user_id])
+            for candidate_product_id in candidate_product_ids[::-1]:
+                if len(top10_product_ids) >= 10:
+                    break
+                if candidate_product_id in train_product_ids or candidate_product_id in top10_product_ids:
+                    continue
+                top10_product_ids.append(candidate_product_id)
+        
+        pred_labels_chunk[user_id] = top10_product_ids[::-1]
+    return pred_labels_chunk
+
+
+def evaluate_paths(path_file, train_labels, test_labels, args):
     embeds = load_embed(args.dataset)
     user_embeds = embeds[USER]
     purchase_embeds = embeds[VIEW][0] if args.dataset == FOOD else embeds[PURCHASE][0]
@@ -136,31 +202,31 @@ def evaluate_paths(path_file, train_labels, test_labels):
         path_prob = reduce(lambda x, y: x * y, probs)
         pred_paths[user_id][product_id].append((path_score, path_prob, path))
     
-    best_pred_paths = {uid: [] for uid in pred_paths}
-    for user_id in pred_paths:
-        train_product_ids = set(train_labels[user_id])
-        for product_id in pred_paths[user_id]:
-            if product_id in train_product_ids:
-                continue
-            sorted_paths = sorted(pred_paths[user_id][product_id], key=lambda x: x[1], reverse=True)
-            best_pred_paths[user_id].append(sorted_paths[0])
+    # Parallelize finding best paths
+    num_workers = max(1, min(args.num_workers, mp.cpu_count()))
+    ctx = mp.get_context('spawn')
+    user_ids = list(pred_paths.keys())
+    chunk_size = (len(user_ids) + num_workers - 1) // num_workers
+    user_id_chunks = [user_ids[i:i + chunk_size] for i in range(0, len(user_ids), chunk_size)]
+    args_bundles_1 = [(chunk, pred_paths, train_labels) for chunk in user_id_chunks]
+    
+    best_pred_paths = {}
+    with ctx.Pool(processes=num_workers) as pool:
+        results_1 = list(tqdm(pool.imap_unordered(_evaluate_best_paths_worker, args_bundles_1), total=len(args_bundles_1), desc="Finding best paths"))
+    for chunk_result in results_1:
+        best_pred_paths.update(chunk_result)
+
+    # Parallelize generating final labels
+    user_ids_for_labels = list(best_pred_paths.keys())
+    chunk_size_2 = (len(user_ids_for_labels) + num_workers - 1) // num_workers
+    user_id_chunks_2 = [user_ids_for_labels[i:i + chunk_size_2] for i in range(0, len(user_ids_for_labels), chunk_size_2)]
+    args_bundles_2 = [(chunk, best_pred_paths, scores, train_labels, args) for chunk in user_id_chunks_2]
 
     pred_labels = {}
-    for user_id in best_pred_paths:
-        sorted_paths = sorted(best_pred_paths[user_id], key=lambda x: (x[0], x[1]), reverse=True)
-        top10_product_ids = [p[-1][2] for _, _, p in sorted_paths[:10]]
-        
-        if args.add_products and len(top10_product_ids) < 10:
-            train_product_ids = set(train_labels[user_id])
-            candidate_product_ids = np.argsort(scores[user_id])
-            for candidate_product_id in candidate_product_ids[::-1]:
-                if candidate_product_id in train_product_ids or candidate_product_id in top10_product_ids:
-                    continue
-                top10_product_ids.append(candidate_product_id)
-                if len(top10_product_ids) >= 10:
-                    break
-        
-        pred_labels[user_id] = top10_product_ids[::-1]
+    with ctx.Pool(processes=num_workers) as pool:
+        results_2 = list(tqdm(pool.imap_unordered(_evaluate_labels_worker, args_bundles_2), total=len(args_bundles_2), desc="Generating labels"))
+    for chunk_result in results_2:
+        pred_labels.update(chunk_result)
 
     evaluate(pred_labels, test_labels)
 
@@ -175,7 +241,7 @@ def test(args):
     if args.run_path:
         predict_paths(policy_file, args, path_file)
     if args.run_eval:
-        evaluate_paths(path_file, train_labels, test_labels)
+        evaluate_paths(path_file, train_labels, test_labels, args)
 
 
 if __name__ == "__main__":
@@ -195,6 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--topk", type=int, nargs="*", default=[25, 5, 1], help="number of samples")
     parser.add_argument("--run_path", action="store_true", help="Run path prediction?")
     parser.add_argument("--run_eval", action="store_true", help="Run evaluation?")
+    parser.add_argument("--num_workers", type=int, default=mp.cpu_count(), help="Number of workers for multiprocessing.")
     
     args = parser.parse_args()
     args.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
