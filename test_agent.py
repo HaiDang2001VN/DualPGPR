@@ -68,7 +68,7 @@ def batch_beam_search(env, model, user_ids, device, topk=[25, 5, 1]):
         probs, _ = model((state_tensor, actmask_tensor))
         probs += actmask_tensor.float()
         topk_probs, topk_idxs = torch.topk(probs, topk[hop], dim=1)
-        topk_idxs, topk_probs = topk_idxs.cpu().numpy(), topk_probs.cpu().numpy()
+        topk_idxs, topk_probs = topk_idxs.cpu().numpy(), topk_probs.cpu().detach().numpy()
 
         new_path_pool, new_probs_pool = [], []
         for row in range(topk_idxs.shape[0]):
